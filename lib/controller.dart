@@ -1,8 +1,10 @@
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
+import 'package:lottie/lottie.dart';
 import 'login.dart';
 
 class ControllerPage extends StatefulWidget {
@@ -14,15 +16,19 @@ class ControllerPage extends StatefulWidget {
 
 class _ControllerPageState extends State<ControllerPage> {
   static const _storage = FlutterSecureStorage();
+
   static const _baseUrl = 'https://whatsapp-ai-assistant-ee5w.onrender.com';
+
   static const _timeout = Duration(seconds: 10);
 
   String? _apiKey;
+
   bool _isEnabled = false;
   bool _isLoadingStatus = true;
   bool _isUpdating = false;
+  bool _serverConnected = true;
+
   String? _errorMessage;
-  String? _successMessage;
 
   @override
   void initState() {
@@ -35,6 +41,20 @@ class _ControllerPageState extends State<ControllerPage> {
     await _loadStatus();
   }
 
+  Future<void> _forceLogout() async {
+    await _storage.delete(key: 'api_key');
+
+    if (!mounted) return;
+
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const LoginPage(),
+      ),
+          (route) => false,
+    );
+  }
+
   Future<void> _loadStatus() async {
     setState(() {
       _isLoadingStatus = true;
@@ -43,37 +63,67 @@ class _ControllerPageState extends State<ControllerPage> {
 
     try {
       final response = await http
-          .get(Uri.parse('$_baseUrl/status'))
+          .get(
+        Uri.parse('$_baseUrl/status'),
+        headers: {
+          'x-api-key': _apiKey ?? '',
+        },
+      )
           .timeout(_timeout);
 
       if (!mounted) return;
 
       if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        final data = jsonDecode(response.body);
         setState(() {
-          _isEnabled = data['aiEnabled'] as bool? ?? false;
+          _isEnabled = data['aiEnabled'] ?? false;
+          _serverConnected = true;
+        });
+      } else if (response.statusCode == 401 ||
+          response.statusCode == 403) {
+        await _forceLogout();
+        return;
+      } else if (response.statusCode == 500) {
+        setState(() {
+          _serverConnected = true;
+          _errorMessage =
+          'Internal server error. Please try again later.';
+        });
+      } else if (response.statusCode == 503) {
+        setState(() {
+          _serverConnected = true;
+          _errorMessage =
+          'Service unavailable. Please try again later.';
         });
       } else {
         setState(() {
+          _serverConnected = true;
           _errorMessage =
           'Failed to load status (${response.statusCode})';
         });
       }
     } on TimeoutException {
       if (!mounted) return;
+
       setState(() {
+        _serverConnected = false;
         _errorMessage =
         'Server did not respond in time. Please try again.';
       });
     } catch (e) {
       if (!mounted) return;
+
       setState(() {
+        _serverConnected = false;
         _errorMessage =
         'Connection failed. Please check your internet connection.';
       });
+
       debugPrint('Load status error: $e');
     } finally {
-      if (mounted) setState(() => _isLoadingStatus = false);
+      if (mounted) {
+        setState(() => _isLoadingStatus = false);
+      }
     }
   }
 
@@ -81,7 +131,6 @@ class _ControllerPageState extends State<ControllerPage> {
     setState(() {
       _isUpdating = true;
       _errorMessage = null;
-      _successMessage = null;
     });
 
     try {
@@ -92,7 +141,9 @@ class _ControllerPageState extends State<ControllerPage> {
           'Content-Type': 'application/json',
           'x-api-key': _apiKey ?? '',
         },
-        body: jsonEncode({'enabled': newValue}),
+        body: jsonEncode({
+          'enabled': newValue,
+        }),
       )
           .timeout(_timeout);
 
@@ -101,45 +152,41 @@ class _ControllerPageState extends State<ControllerPage> {
       if (response.statusCode == 200) {
         setState(() {
           _isEnabled = newValue;
-          _successMessage =
-          newValue
-              ? 'AI has been enabled successfully.'
-              : 'AI has been disabled successfully.';
-        });
-
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted) setState(() => _successMessage = null);
+          _serverConnected = true;
         });
       } else if (response.statusCode == 401 ||
           response.statusCode == 403) {
-        setState(() {
-          _errorMessage =
-          'Invalid API key. Please log in again.';
-        });
+        await _forceLogout();
+        return;
       } else {
         setState(() {
           _errorMessage =
-          'Update failed (${response.statusCode}). Please try again.';
+          'Update failed (${response.statusCode}).';
         });
       }
     } on TimeoutException {
       if (!mounted) return;
+
       setState(() {
-        _errorMessage =
-        'Server did not respond in time.';
+        _serverConnected = false;
+        _errorMessage = 'Server did not respond in time.';
       });
     } catch (e) {
       if (!mounted) return;
+
       setState(() {
+        _serverConnected = false;
         _errorMessage =
         'Connection failed. Please check your internet connection.';
       });
+
       debugPrint('Update status error: $e');
     } finally {
-      if (mounted) setState(() => _isUpdating = false);
+      if (mounted) {
+        setState(() => _isUpdating = false);
+      }
     }
   }
-
 
   Future<void> _logout() async {
     final confirm = await showDialog<bool>(
@@ -155,25 +202,19 @@ class _ControllerPageState extends State<ControllerPage> {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
             ),
+            onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Logout'),
           ),
         ],
       ),
     );
 
-    if (confirm != true || !mounted) return;
-
-    await _storage.delete(key: 'api_key');
-
-    if (!mounted) return;
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const LoginPage()),
-    );
+    if (confirm == true) {
+      await _forceLogout();
+    }
   }
 
   @override
@@ -187,21 +228,16 @@ class _ControllerPageState extends State<ControllerPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.logout_rounded),
-            tooltip: 'Logout',
             onPressed: _logout,
           ),
         ],
       ),
+
       body: SafeArea(
         child: _isLoadingStatus
-            ? const Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Loading status...'),
-            ],
+            ? Center(
+          child: Lottie.asset(
+            "assets/lottiefiles/Sandy Loading.json",
           ),
         )
             : RefreshIndicator(
@@ -211,28 +247,19 @@ class _ControllerPageState extends State<ControllerPage> {
             padding: const EdgeInsets.all(24),
             child: Column(
               children: [
-
                 if (_errorMessage != null)
                   _buildBanner(
                     message: _errorMessage!,
                     color: Colors.red,
                     icon: Icons.error_outline_rounded,
-                    onDismiss: () =>
-                        setState(() => _errorMessage = null),
-                  ),
-
-
-                if (_successMessage != null)
-                  _buildBanner(
-                    message: _successMessage!,
-                    color: Colors.green,
-                    icon: Icons.check_circle_outline_rounded,
-                    onDismiss: () =>
-                        setState(() => _successMessage = null),
+                    onDismiss: () {
+                      setState(
+                            () => _errorMessage = null,
+                      );
+                    },
                   ),
 
                 const SizedBox(height: 16),
-
 
                 Card(
                   elevation: 0,
@@ -248,12 +275,16 @@ class _ControllerPageState extends State<ControllerPage> {
                       children: [
 
                         AnimatedContainer(
-                          duration: const Duration(milliseconds: 400),
+                          duration: const Duration(
+                            milliseconds: 400,
+                          ),
                           width: 100,
                           height: 100,
                           decoration: BoxDecoration(
                             color: _isEnabled
-                                ? const Color(0xFF5C6BC0).withOpacity(0.1)
+                                ? const Color(
+                              0xFF5C6BC0,
+                            ).withOpacity(0.1)
                                 : Colors.grey.shade100,
                             shape: BoxShape.circle,
                           ),
@@ -265,16 +296,19 @@ class _ControllerPageState extends State<ControllerPage> {
                                 : Colors.grey.shade400,
                           ),
                         ),
+
                         const SizedBox(height: 20),
 
-
                         AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 300),
+                          duration: const Duration(
+                            milliseconds: 300,
+                          ),
                           child: _StatusBadge(
                             key: ValueKey(_isEnabled),
                             isEnabled: _isEnabled,
                           ),
                         ),
+
                         const SizedBox(height: 8),
 
                         Text(
@@ -287,6 +321,7 @@ class _ControllerPageState extends State<ControllerPage> {
                             color: Colors.grey.shade600,
                           ),
                         ),
+
                         const SizedBox(height: 28),
 
                         Row(
@@ -305,7 +340,8 @@ class _ControllerPageState extends State<ControllerPage> {
                               width: 36,
                               height: 20,
                               child: Center(
-                                child: CircularProgressIndicator(
+                                child:
+                                CircularProgressIndicator(
                                   strokeWidth: 2,
                                 ),
                               ),
@@ -318,8 +354,8 @@ class _ControllerPageState extends State<ControllerPage> {
                             ),
                           ],
                         ),
-                        const Divider(height: 32),
 
+                        const Divider(height: 32),
 
                         Row(
                           children: [
@@ -328,16 +364,16 @@ class _ControllerPageState extends State<ControllerPage> {
                               height: 10,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: _errorMessage != null
-                                    ? Colors.red
-                                    : Colors.green,
+                                color: _serverConnected
+                                    ? Colors.green
+                                    : Colors.red,
                               ),
                             ),
                             const SizedBox(width: 8),
                             Text(
-                              _errorMessage != null
-                                  ? 'Server Disconnected'
-                                  : 'Server Connected',
+                              _serverConnected
+                                  ? 'Server Connected'
+                                  : 'Server Disconnected',
                               style: TextStyle(
                                 fontSize: 13,
                                 color: Colors.grey.shade600,
@@ -353,21 +389,11 @@ class _ControllerPageState extends State<ControllerPage> {
                             ),
                           ],
                         ),
+
                       ],
                     ),
                   ),
-                ),
-
-                const SizedBox(height: 16),
-
-                // Pull to refresh hint
-                Text(
-                  'Pull down to refresh',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade400,
-                  ),
-                ),
+                )
               ],
             ),
           ),
@@ -382,55 +408,75 @@ class _ControllerPageState extends State<ControllerPage> {
     required IconData icon,
     required VoidCallback onDismiss,
   }) {
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 300),
-      child: Container(
-        width: double.infinity,
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.08),
-          border: Border.all(color: color.withOpacity(0.3)),
-          borderRadius: BorderRadius.circular(10),
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 10,
+      ),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        border: Border.all(
+          color: color.withOpacity(0.3),
         ),
-        child: Row(
-          children: [
-            Icon(icon, color: color, size: 18),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(color: color, fontSize: 13),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            color: color,
+            size: 18,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                color: color,
+                fontSize: 13,
               ),
             ),
-            GestureDetector(
-              onTap: onDismiss,
-              child: Icon(Icons.close_rounded, color: color, size: 18),
+          ),
+          GestureDetector(
+            onTap: onDismiss,
+            child: Icon(
+              Icons.close_rounded,
+              color: color,
+              size: 18,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 }
 
-// Status badge আলাদা widget হিসেবে AnimatedSwitcher-এ ব্যবহারের জন্য
 class _StatusBadge extends StatelessWidget {
   final bool isEnabled;
 
-  const _StatusBadge({super.key, required this.isEnabled});
+  const _StatusBadge({
+    super.key,
+    required this.isEnabled,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 8,
+      ),
       decoration: BoxDecoration(
         color: isEnabled
             ? Colors.green.shade50
             : Colors.red.shade50,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: isEnabled ? Colors.green.shade200 : Colors.red.shade200,
+          color: isEnabled
+              ? Colors.green.shade200
+              : Colors.red.shade200,
         ),
       ),
       child: Row(
@@ -441,16 +487,20 @@ class _StatusBadge extends StatelessWidget {
                 ? Icons.check_circle_rounded
                 : Icons.cancel_rounded,
             size: 16,
-            color: isEnabled ? Colors.green.shade700 : Colors.red.shade700,
+            color: isEnabled
+                ? Colors.green.shade700
+                : Colors.red.shade700,
           ),
           const SizedBox(width: 6),
           Text(
-            isEnabled ? 'AI Enabled' : 'AI Disabled',
+            isEnabled
+                ? 'AI Enabled'
+                : 'AI Disabled',
             style: TextStyle(
               fontWeight: FontWeight.w600,
-              color:
-              isEnabled ? Colors.green.shade700 : Colors.red.shade700,
-              fontSize: 14,
+              color: isEnabled
+                  ? Colors.green.shade700
+                  : Colors.red.shade700,
             ),
           ),
         ],

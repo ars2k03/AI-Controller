@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
 import 'package:lottie/lottie.dart';
 import 'controller.dart';
 
@@ -14,7 +15,9 @@ class _LoginPageState extends State<LoginPage> {
   final _controller = TextEditingController();
   final _formKey = GlobalKey<FormState>();
   static const _storage = FlutterSecureStorage();
-
+  static const _baseUrl = 'https://whatsapp-ai-assistant-ee5w.onrender.com';
+  static const _timeout = Duration(seconds: 10);
+  String? _apiKey;
   bool _obscureText = true;
   bool _isLoading = false;
   bool _isCheckingLogin = true;
@@ -66,20 +69,44 @@ class _LoginPageState extends State<LoginPage> {
     });
 
     try {
-      final apiKey = _controller.text.trim();
+      _apiKey = _controller.text.trim();
 
-      await _storage.write(key: 'api_key', value: apiKey);
+      final response = await http
+          .get(Uri.parse('$_baseUrl/status'),headers: {
+            'x-api-key': _apiKey ?? '',
+          })
+          .timeout(_timeout);
 
       if (!mounted) return;
-      _goToControlPage();
+
+      if(response.statusCode == 200){
+        await _storage.write(key: 'api_key', value: _apiKey);
+
+        _goToControlPage();
+      }else if(response.statusCode == 401 || response.statusCode == 403){
+        setState(() {
+          _errorMessage = 'Invalid API key. Please try again.';
+        });
+      }else{
+        setState(() {
+          _errorMessage = 'Failed to connect to server. Please try again.';
+        });
+      }
+
     } catch (e) {
+
       if (!mounted) return;
+
       setState(() {
         _errorMessage = 'Failed to save API key. Please try again.';
       });
+
       debugPrint('Login error: $e');
+
     } finally {
+
       if (mounted) setState(() => _isLoading = false);
+
     }
   }
 
@@ -151,6 +178,7 @@ class _LoginPageState extends State<LoginPage> {
                     obscureText: _obscureText,
                     autocorrect: false,
                     enableSuggestions: false,
+                    textInputAction: TextInputAction.done,
                     decoration: InputDecoration(
                       labelText: 'API Key',
                       hintText: 'Enter your API key',
